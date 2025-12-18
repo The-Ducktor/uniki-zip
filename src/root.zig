@@ -35,6 +35,7 @@
 //! ```
 
 const std = @import("std");
+const flate = std.compress.flate;
 
 /// A pure in-memory ZIP reader that doesn't require File.Reader
 /// This implementation reads directly from a byte slice in memory
@@ -219,29 +220,78 @@ pub const MemoryZipReader = struct {
         }
 
         fn decompressDeflate(self: Entry, compressed_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
+            // Handle empty files
+            if (self.uncompressed_size == 0) {
+                return try allocator.alloc(u8, 0);
+            }
+
             // Allocate output buffer
             const result = try allocator.alloc(u8, self.uncompressed_size);
             errdefer allocator.free(result);
 
-            // Create a fixed buffer stream from compressed data
-            var stream = std.io.fixedBufferStream(compressed_data);
-            var stream_reader = stream.reader();
+            // We need to pad the compressed data to avoid underflow in alignBitsPreserving.
+            // The decompressor may read ahead and then try to "put back" bytes by decrementing
+            // the seek position. With a small buffer, this can cause integer underflow.
+            // By providing extra padding, we ensure the seek position has room to be decremented.
+            const padding_size: usize = 16; // Extra bytes to prevent underflow
+            const padded_size = compressed_data.len + padding_size;
+            const padded_buffer = try allocator.alloc(u8, padded_size);
+            defer allocator.free(padded_buffer);
 
-            // Adapt the old-style reader to the new API
-            var reader_buffer: [4096]u8 = undefined;
-            var adapted_reader = stream_reader.adaptToNewApi(&reader_buffer);
+            @memcpy(padded_buffer[0..compressed_data.len], compressed_data);
+            @memset(padded_buffer[compressed_data.len..], 0);
+
+            // Create a reader from the padded buffer
+            var input_reader = std.Io.Reader.fixed(padded_buffer);
 
             // Create decompressor with a window buffer for history
             // ZIP uses raw deflate (no zlib/gzip wrapper)
-            var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
-            var decompressor = std.compress.flate.Decompress.init(
-                &adapted_reader.new_interface,
+            var decompress_buffer: [flate.max_window_len]u8 = undefined;
+            var decompressor = flate.Decompress.init(
+                &input_reader,
                 .raw,
                 &decompress_buffer,
             );
 
-            // Read all decompressed data
-            try decompressor.reader.readSliceAll(result);
+            // Read decompressed data iteratively to handle end-of-stream properly
+            var total_read: usize = 0;
+            while (total_read < self.uncompressed_size) {
+                const remaining = self.uncompressed_size - total_read;
+                const bytes_read = decompressor.reader.readSliceShort(result[total_read..]) catch |err| {
+                    // EndOfStream before we got all data is an error
+                    if (err == error.EndOfStream) {
+                        if (total_read < self.uncompressed_size) {
+                            return error.DecompressTruncated;
+                        }
+                        break;
+                    }
+                    return err;
+                };
+
+                if (bytes_read == 0) {
+                    // No more data available
+                    if (total_read < self.uncompressed_size) {
+                        return error.DecompressTruncated;
+                    }
+                    break;
+                }
+
+                total_read += bytes_read;
+
+                // Check if we've read enough
+                if (total_read >= self.uncompressed_size) {
+                    break;
+                }
+
+                // Safety check to prevent infinite loop
+                if (bytes_read == 0 and remaining == self.uncompressed_size - total_read) {
+                    break;
+                }
+            }
+
+            if (total_read != self.uncompressed_size) {
+                return error.DecompressSizeMismatch;
+            }
 
             return result;
         }
