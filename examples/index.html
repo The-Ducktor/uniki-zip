@@ -1,211 +1,268 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Zig In-Memory ZIP Reader WASM Demo</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            line-height: 1.6;
-            color: #333;
-        }
-        h1 { color: #f7a41d; } /* Zig orange */
-        .container {
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 20px;
-            background: #f9f9f9;
-        }
-        .controls {
-            margin-bottom: 20px;
-        }
-        button {
-            background-color: #f7a41d;
-            color: white;
-            border: none;
-            padding: 10px 15px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 16px;
-        }
-        button:hover { background-color: #e09210; }
-        button:disabled { background-color: #ccc; cursor: not-allowed; }
-        #output {
-            margin-top: 20px;
-            white-space: pre-wrap;
-            font-family: monospace;
-            background: #333;
-            color: #fff;
-            padding: 15px;
-            border-radius: 4px;
-            min-height: 200px;
-            overflow-x: auto;
-        }
-        .entry {
-            border-bottom: 1px solid #555;
-            padding: 10px 0;
-        }
-        .entry:last-child { border-bottom: none; }
-        .entry-header { font-weight: bold; color: #f7a41d; }
-    </style>
-</head>
-<body>
-    <h1>Zig In-Memory ZIP Reader</h1>
-    <p>This demo uses a Zig library compiled to WebAssembly to read and decompress ZIP files entirely in the browser memory.</p>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Zig In-Memory ZIP Reader WASM Demo</title>
+        <style>
+            body {
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    Helvetica, Arial, sans-serif;
+                max-width: 800px;
+                margin: 0 auto;
+                padding: 20px;
+                line-height: 1.6;
+                color: #333;
+            }
+            h1 {
+                color: #f7a41d;
+            } /* Zig orange */
+            .container {
+                border: 1px solid #ddd;
+                border-radius: 8px;
+                padding: 20px;
+                background: #f9f9f9;
+            }
+            .controls {
+                margin-bottom: 20px;
+            }
+            button {
+                background-color: #f7a41d;
+                color: white;
+                border: none;
+                padding: 10px 15px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 16px;
+            }
+            button:hover {
+                background-color: #e09210;
+            }
+            button:disabled {
+                background-color: #ccc;
+                cursor: not-allowed;
+            }
+            #output {
+                margin-top: 20px;
+                white-space: pre-wrap;
+                font-family: monospace;
+                background: #333;
+                color: #fff;
+                padding: 15px;
+                border-radius: 4px;
+                min-height: 200px;
+                overflow-x: auto;
+            }
+            .entry {
+                border-bottom: 1px solid #555;
+                padding: 10px 0;
+            }
+            .entry:last-child {
+                border-bottom: none;
+            }
+            .entry-header {
+                font-weight: bold;
+                color: #f7a41d;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>Zig In-Memory ZIP Reader</h1>
+        <p>
+            This demo uses a Zig library compiled to WebAssembly to read and
+            decompress ZIP files entirely in the browser memory.
+        </p>
 
-    <div class="container">
-        <div class="controls">
-            <input type="file" id="fileInput" accept=".zip,.epub,.jar" disabled>
+        <div class="container">
+            <div class="controls">
+                <input
+                    type="file"
+                    id="fileInput"
+                    accept=".zip,.epub,.jar"
+                    disabled
+                />
+            </div>
+            <div id="status">Loading WASM...</div>
         </div>
-        <div id="status">Loading WASM...</div>
-    </div>
 
-    <div id="output"></div>
+        <div id="output"></div>
 
-    <script>
-        let wasmInstance = null;
-        let wasmMemory = null;
-        let wasmExports = null;
+        <script>
+            let wasmInstance = null;
+            let wasmMemory = null;
+            let wasmExports = null;
 
-        const statusEl = document.getElementById('status');
-        const outputEl = document.getElementById('output');
-        const fileInput = document.getElementById('fileInput');
+            const statusEl = document.getElementById("status");
+            const outputEl = document.getElementById("output");
+            const fileInput = document.getElementById("fileInput");
 
-        function log(msg, isError = false) {
-            const div = document.createElement('div');
-            div.textContent = msg;
-            if (isError) div.style.color = '#ff6b6b';
-            outputEl.appendChild(div);
-            outputEl.scrollTop = outputEl.scrollHeight;
-        }
-
-        async function initWasm() {
-            try {
-                // Try to load from the same directory, or fallback to the bin directory
-                let response = await fetch('uniki-zip.wasm');
-                if (!response.ok) {
-                    response = await fetch('../zig-out/bin/uniki-zip.wasm');
-                }
-                if (!response.ok) {
-                    throw new Error('Could not find uniki-zip.wasm');
-                }
-
-                const { instance } = await WebAssembly.instantiateStreaming(response, {
-                    env: {
-                        // Zig freestanding might need these if not fully stripped,
-                        // but usually panic is handled internally in our wasm.zig
-                    }
-                });
-
-                wasmInstance = instance;
-                wasmExports = instance.exports;
-                wasmMemory = wasmExports.memory;
-
-                statusEl.textContent = 'WASM Loaded. Select a ZIP file.';
-                fileInput.disabled = false;
-                log('WASM module initialized successfully.');
-                log('Exports: ' + Object.keys(wasmExports).join(', '));
-
-            } catch (err) {
-                statusEl.textContent = 'Error loading WASM';
-                log('Failed to load WASM: ' + err.message, true);
-                console.error(err);
+            function log(msg, isError = false) {
+                const div = document.createElement("div");
+                div.textContent = msg;
+                if (isError) div.style.color = "#ff6b6b";
+                outputEl.appendChild(div);
+                outputEl.scrollTop = outputEl.scrollHeight;
             }
-        }
 
-        fileInput.addEventListener('change', async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
+            async function initWasm() {
+                try {
+                    // Try to load from the same directory, or fallback to the bin directory
+                    let response = await fetch("uniki-zip.wasm");
+                    if (!response.ok) {
+                        response = await fetch("../zig-out/bin/uniki-zip.wasm");
+                    }
+                    if (!response.ok) {
+                        throw new Error("Could not find uniki-zip.wasm");
+                    }
 
-            outputEl.innerHTML = '';
-            log(`Reading ${file.name} (${file.size} bytes)...`);
+                    const { instance } = await WebAssembly.instantiateStreaming(
+                        response,
+                        {
+                            env: {
+                                console_log: (ptr, len) => {
+                                    if (wasmMemory) {
+                                        const msg = new TextDecoder().decode(
+                                            new Uint8Array(
+                                                wasmMemory.buffer,
+                                                ptr,
+                                                len,
+                                            ),
+                                        );
+                                        console.log(`[WASM] ${msg}`);
+                                    }
+                                },
+                            },
+                        },
+                    );
 
-            try {
-                const arrayBuffer = await file.arrayBuffer();
-                const u8Array = new Uint8Array(arrayBuffer);
+                    wasmInstance = instance;
+                    wasmExports = instance.exports;
+                    wasmMemory = wasmExports.memory;
 
-                // 1. Allocate memory in WASM
-                const ptr = wasmExports.alloc(u8Array.length);
-                if (ptr === 0) throw new Error('WASM allocation failed');
+                    statusEl.textContent = "WASM Loaded. Select a ZIP file.";
+                    fileInput.disabled = false;
+                    log("WASM module initialized successfully.");
+                    log("Exports: " + Object.keys(wasmExports).join(", "));
+                } catch (err) {
+                    statusEl.textContent = "Error loading WASM";
+                    log("Failed to load WASM: " + err.message, true);
+                    console.error(err);
+                }
+            }
 
-                // 2. Copy data to WASM memory
-                const wasmSlice = new Uint8Array(wasmMemory.buffer, ptr, u8Array.length);
-                wasmSlice.set(u8Array);
+            fileInput.addEventListener("change", async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
 
-                log(`Data copied to WASM memory at offset ${ptr}`);
+                outputEl.innerHTML = "";
+                log(`Reading ${file.name} (${file.size} bytes)...`);
 
-                // 3. Get entry count
-                const count = wasmExports.get_entry_count(ptr, u8Array.length);
-                log(`Found ${count} entries in the ZIP.`);
+                try {
+                    const arrayBuffer = await file.arrayBuffer();
+                    const u8Array = new Uint8Array(arrayBuffer);
 
-                if (count < 0) {
-                    log('Error reading ZIP structure.', true);
+                    // 1. Allocate memory in WASM
+                    const ptr = wasmExports.alloc(u8Array.length);
+                    if (ptr === 0) throw new Error("WASM allocation failed");
+
+                    // 2. Copy data to WASM memory
+                    const wasmSlice = new Uint8Array(
+                        wasmMemory.buffer,
+                        ptr,
+                        u8Array.length,
+                    );
+                    wasmSlice.set(u8Array);
+
+                    log(`Data copied to WASM memory at offset ${ptr}`);
+
+                    // 3. Get entry count
+                    const count = wasmExports.get_entry_count(
+                        ptr,
+                        u8Array.length,
+                    );
+                    log(`Found ${count} entries in the ZIP.`);
+
+                    if (count < 0) {
+                        log("Error reading ZIP structure.", true);
+                        wasmExports.free(ptr, u8Array.length);
+                        return;
+                    }
+
+                    // 4. Iterate and decompress entries
+                    // Note: Our current WASM export doesn't give us filenames, only index access.
+                    // We will decompress the first 5 entries as a demo.
+
+                    const limit = Math.min(count, 10);
+                    log(`Decompressing first ${limit} entries...`);
+
+                    // Allocate space for the output length pointer (usize is 4 bytes in wasm32)
+                    const outLenPtr = wasmExports.alloc(4);
+                    const outLenView = new DataView(wasmMemory.buffer);
+
+                    for (let i = 0; i < limit; i++) {
+                        // Call decompress_entry
+                        const dataPtr = wasmExports.decompress_entry(
+                            ptr,
+                            u8Array.length,
+                            i,
+                            outLenPtr,
+                        );
+                        console.log("dataPtr: " + dataPtr);
+
+                        if (dataPtr === 0) {
+                            log(`[Entry ${i}] Failed to decompress or empty.`);
+                            continue;
+                        }
+
+                        // Read the length written to outLenPtr
+                        // We must re-create DataView because memory buffer might have grown/detached
+                        const currentView = new DataView(wasmMemory.buffer);
+                        const dataLen = currentView.getUint32(outLenPtr, true); // Little endian
+
+                        // Read the decompressed data
+                        const dataSlice = new Uint8Array(
+                            wasmMemory.buffer,
+                            dataPtr,
+                            dataLen,
+                        );
+
+                        // Try to decode as text for preview
+                        let preview = "";
+                        try {
+                            const textDecoder = new TextDecoder("utf-8", {
+                                fatal: true,
+                            });
+                            // Only decode first 100 bytes
+                            const subSlice = dataSlice.subarray(
+                                0,
+                                Math.min(100, dataLen),
+                            );
+                            preview = textDecoder.decode(subSlice);
+                            if (dataLen > 100) preview += "...";
+                        } catch (e) {
+                            preview = "<binary data>";
+                        }
+
+                        log(
+                            `[Entry ${i}] Size: ${dataLen} bytes. Preview: ${preview.replace(/\n/g, "\\n")}`,
+                        );
+
+                        // Free the decompressed data
+                        wasmExports.free(dataPtr, dataLen);
+                    }
+
+                    // Clean up
+                    wasmExports.free(outLenPtr, 4);
                     wasmExports.free(ptr, u8Array.length);
-                    return;
+                    log("Done. Memory freed.");
+                } catch (err) {
+                    log("Error processing file: " + err.message, true);
+                    console.error(err);
                 }
+            });
 
-                // 4. Iterate and decompress entries
-                // Note: Our current WASM export doesn't give us filenames, only index access.
-                // We will decompress the first 5 entries as a demo.
-
-                const limit = Math.min(count, 10);
-                log(`Decompressing first ${limit} entries...`);
-
-                // Allocate space for the output length pointer (usize is 4 bytes in wasm32)
-                const outLenPtr = wasmExports.alloc(4);
-                const outLenView = new DataView(wasmMemory.buffer);
-
-                for (let i = 0; i < limit; i++) {
-                    // Call decompress_entry
-                    const dataPtr = wasmExports.decompress_entry(ptr, u8Array.length, i, outLenPtr);
-
-                    if (dataPtr === 0) {
-                        log(`[Entry ${i}] Failed to decompress or empty.`);
-                        continue;
-                    }
-
-                    // Read the length written to outLenPtr
-                    // We must re-create DataView because memory buffer might have grown/detached
-                    const currentView = new DataView(wasmMemory.buffer);
-                    const dataLen = currentView.getUint32(outLenPtr, true); // Little endian
-
-                    // Read the decompressed data
-                    const dataSlice = new Uint8Array(wasmMemory.buffer, dataPtr, dataLen);
-
-                    // Try to decode as text for preview
-                    let preview = "";
-                    try {
-                        const textDecoder = new TextDecoder('utf-8', { fatal: true });
-                        // Only decode first 100 bytes
-                        const subSlice = dataSlice.subarray(0, Math.min(100, dataLen));
-                        preview = textDecoder.decode(subSlice);
-                        if (dataLen > 100) preview += "...";
-                    } catch (e) {
-                        preview = "<binary data>";
-                    }
-
-                    log(`[Entry ${i}] Size: ${dataLen} bytes. Preview: ${preview.replace(/\n/g, '\\n')}`);
-
-                    // Free the decompressed data
-                    wasmExports.free(dataPtr, dataLen);
-                }
-
-                // Clean up
-                wasmExports.free(outLenPtr, 4);
-                wasmExports.free(ptr, u8Array.length);
-                log('Done. Memory freed.');
-
-            } catch (err) {
-                log('Error processing file: ' + err.message, true);
-                console.error(err);
-            }
-        });
-
-        initWasm();
-    </script>
-</body>
+            initWasm();
+        </script>
+    </body>
 </html>

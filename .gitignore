@@ -1,3 +1,4 @@
 .zig-cache
 zig-out/
 .DS_Store
+files/eos-project-1.zip

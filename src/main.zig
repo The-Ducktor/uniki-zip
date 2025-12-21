@@ -11,7 +11,7 @@ pub fn main() !void {
     std.debug.print("\n=== Reading ZIP from memory (workaround with temp file) ===\n", .{});
     // Example 2: Read ZIP from memory using temp file workaround
     const cwd = std.fs.cwd();
-    const zip_data = try cwd.readFileAlloc(allocator, "archive.zip", 100 * 1024 * 1024); // max 100MB
+    const zip_data = try cwd.readFileAlloc(allocator, "files/b.epub", 100 * 1024 * 1024); // max 100MB
     defer allocator.free(zip_data);
 
     try readZipFromMemory(zip_data);
@@ -23,7 +23,7 @@ pub fn main() !void {
 
 fn readZipFromFile() !void {
     const cwd = std.fs.cwd();
-    const zipFile = try cwd.openFile("archive.zip", .{});
+    const zipFile = try cwd.openFile("files/b.epub", .{});
     defer zipFile.close();
 
     var buffer: [4096]u8 = undefined;
