@@ -54,22 +54,51 @@ pub const MemoryZipReader = struct {
     }
 
     /// Create an iterator to iterate through all entries in the ZIP file
-    pub fn iterate(self: *const MemoryZipReader, allocator: std.mem.Allocator) !Iterator {
+    pub fn iterate(self: *const MemoryZipReader) !Iterator {
         const eocd = try self.findEndRecord();
 
         return Iterator{
             .reader = self,
-            .allocator = allocator,
             .total_entries = eocd.cd_records_total,
             .current_entry = 0,
             .current_offset = eocd.cd_offset,
         };
     }
 
+    /// A manifest of all entries in the ZIP file for fast lookup
+    pub const Manifest = struct {
+        map: std.StringHashMap(Entry),
+
+        pub fn deinit(self: *Manifest) void {
+            self.map.deinit();
+        }
+
+        /// Find an entry by filename
+        pub fn get(self: Manifest, filename: []const u8) ?Entry {
+            return self.map.get(filename);
+        }
+    };
+
+    /// Build a manifest for fast entry lookup
+    pub fn buildManifest(self: *const MemoryZipReader, allocator: std.mem.Allocator) !Manifest {
+        const eocd = try self.findEndRecord();
+        var map = std.StringHashMap(Entry).init(allocator);
+        errdefer map.deinit();
+
+        // Pre-allocate space for efficiency
+        try map.ensureTotalCapacity(eocd.cd_records_total);
+
+        var iter = try self.iterate();
+        while (try iter.next()) |entry| {
+            try map.put(entry.filename, entry);
+        }
+
+        return Manifest{ .map = map };
+    }
+
     /// Iterator for ZIP entries
     pub const Iterator = struct {
         reader: *const MemoryZipReader,
-        allocator: std.mem.Allocator,
         total_entries: u16,
         current_entry: u16,
         current_offset: u32,
@@ -107,12 +136,12 @@ pub const MemoryZipReader = struct {
             const comment_len = std.mem.readInt(u16, header[32..34], .little);
             const local_header_offset = std.mem.readInt(u32, header[42..46], .little);
 
-            // Read filename
+            // Read filename directly from memory (no allocation needed)
             const filename_start = offset + 46;
             const filename_end = filename_start + filename_len;
             if (filename_end > data.len) return error.ZipTruncated;
 
-            const filename = try self.allocator.dupe(u8, data[filename_start..filename_end]);
+            const filename = data[filename_start..filename_end];
 
             // Update offset for next entry
             self.current_offset += 46 + filename_len + extra_len + comment_len;
@@ -136,11 +165,6 @@ pub const MemoryZipReader = struct {
         compressed_size: u32,
         uncompressed_size: u32,
         local_header_offset: u32,
-
-        /// Free the memory used by this entry's filename
-        pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
-            allocator.free(self.filename);
-        }
 
         /// Get the compressed data for this entry
         pub fn getCompressedData(self: Entry, reader: *const MemoryZipReader) ![]const u8 {

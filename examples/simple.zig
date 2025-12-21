@@ -27,13 +27,10 @@ pub fn main() !void {
     var reader = zip.MemoryZipReader.init(zip_data);
 
     // Get an iterator for all entries
-    var iter = try reader.iterate(allocator);
+    var iter = try reader.iterate();
 
     // Iterate through all entries
     while (try iter.next()) |entry| {
-        // Important: Always free the entry when done
-        defer entry.deinit(allocator);
-
         std.debug.print("📄 {s}\n", .{entry.filename});
         std.debug.print("   Size: {d} bytes", .{entry.uncompressed_size});
 
@@ -70,5 +67,20 @@ pub fn main() !void {
         std.debug.print("\n", .{});
     }
 
-    std.debug.print("✅ Successfully read all entries!\n", .{});
+    std.debug.print("✅ Successfully read all entries!\n\n", .{});
+
+    // Demonstrate fast lookup using a manifest
+    std.debug.print("--- Manifest Lookup Example ---\n", .{});
+    var manifest = try reader.buildManifest(allocator);
+    defer manifest.deinit();
+
+    // Try to find a file (adjust name based on your ZIP content)
+    const search_name = "hello.txt";
+    if (manifest.get(search_name)) |entry| {
+        const content = try entry.decompress(&reader, allocator);
+        defer allocator.free(content);
+        std.debug.print("Found '{s}' via manifest! Content: {s}\n", .{ search_name, content });
+    } else {
+        std.debug.print("'{s}' not found in manifest.\n", .{search_name});
+    }
 }
