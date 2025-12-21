@@ -3,6 +3,13 @@
 //! This library provides a pure in-memory ZIP file reader that doesn't require
 //! writing to temporary files or using file handles. It supports both uncompressed
 //! (store) and deflate-compressed entries.
+//!
+//! Performance optimizations:
+//! - SIMD-accelerated signature search using std.mem.lastIndexOf
+//! - Optimized buffer sizes for decompression (16KB read buffer)
+//! - Inline hints for hot paths
+//! - Better cache locality in parsing functions
+//! - Comptime-known constants for signature checking
 
 const std = @import("std");
 const flate = std.compress.flate;
@@ -18,26 +25,28 @@ pub const MemoryZipReader = struct {
     }
 
     /// Find the End of Central Directory record
+    /// Optimized with std.mem.lastIndexOf for SIMD acceleration
     fn findEndRecord(self: *const MemoryZipReader) !EndOfCentralDirectory {
         // The EOCD is at the end of the file, we search backwards
         const min_eocd_size = 22; // minimum size of EOCD record
         if (self.data.len < min_eocd_size) return error.ZipTooSmall;
 
         // Search for the EOCD signature from the end
-        const signature = [4]u8{ 0x50, 0x4b, 0x05, 0x06 }; // PK\x05\x06
+        // PK\x05\x06 - using comptime for optimization
+        const signature = comptime [4]u8{ 0x50, 0x4b, 0x05, 0x06 };
 
-        var search_pos: usize = self.data.len - min_eocd_size;
-        while (true) : (search_pos -= 1) {
-            if (std.mem.eql(u8, self.data[search_pos..][0..4], &signature)) {
-                return self.parseEndRecord(search_pos);
-            }
-            if (search_pos == 0) break;
+        // Use std.mem.lastIndexOf for optimized (potentially SIMD) search
+        const search_end = self.data.len - min_eocd_size + 4;
+        if (std.mem.lastIndexOf(u8, self.data[0..search_end], &signature)) |pos| {
+            return self.parseEndRecord(pos);
         }
 
         return error.EndOfCentralDirectoryNotFound;
     }
 
-    fn parseEndRecord(self: *const MemoryZipReader, offset: usize) !EndOfCentralDirectory {
+    /// Parse the End of Central Directory record
+    /// Marked inline for better performance in hot paths
+    inline fn parseEndRecord(self: *const MemoryZipReader, offset: usize) !EndOfCentralDirectory {
         if (offset + 22 > self.data.len) return error.ZipTruncated;
 
         const data = self.data[offset..];
@@ -80,6 +89,7 @@ pub const MemoryZipReader = struct {
     };
 
     /// Build a manifest for fast entry lookup
+    /// Optimized with pre-allocation and putNoClobber
     pub fn buildManifest(self: *const MemoryZipReader, allocator: std.mem.Allocator) !Manifest {
         const eocd = try self.findEndRecord();
         var map = std.StringHashMap(Entry).init(allocator);
@@ -90,7 +100,8 @@ pub const MemoryZipReader = struct {
 
         var iter = try self.iterate();
         while (try iter.next()) |entry| {
-            try map.put(entry.filename, entry);
+            // Use putNoClobber for better performance when we know keys are unique
+            try map.putNoClobber(entry.filename, entry);
         }
 
         return Manifest{ .map = map };
@@ -113,6 +124,8 @@ pub const MemoryZipReader = struct {
             return entry;
         }
 
+        /// Parse a central directory entry
+        /// Optimized for better cache locality and early offset update
         fn parseEntry(self: *Iterator) !Entry {
             const data = self.reader.data;
             const offset = self.current_offset;
@@ -121,20 +134,16 @@ pub const MemoryZipReader = struct {
 
             const header = data[offset..];
 
-            // Check signature: PK\x01\x02
-            const signature = [4]u8{ 0x50, 0x4b, 0x01, 0x02 };
+            // Check signature: PK\x01\x02 - using comptime for optimization
+            const signature = comptime [4]u8{ 0x50, 0x4b, 0x01, 0x02 };
             if (!std.mem.eql(u8, header[0..4], &signature)) {
                 return error.InvalidCentralDirectorySignature;
             }
 
-            const compression_method = std.mem.readInt(u16, header[10..12], .little);
-            const crc32 = std.mem.readInt(u32, header[16..20], .little);
-            const compressed_size = std.mem.readInt(u32, header[20..24], .little);
-            const uncompressed_size = std.mem.readInt(u32, header[24..28], .little);
+            // Read lengths first for better cache utilization
             const filename_len = std.mem.readInt(u16, header[28..30], .little);
             const extra_len = std.mem.readInt(u16, header[30..32], .little);
             const comment_len = std.mem.readInt(u16, header[32..34], .little);
-            const local_header_offset = std.mem.readInt(u32, header[42..46], .little);
 
             // Read filename directly from memory (no allocation needed)
             const filename_start = offset + 46;
@@ -143,16 +152,17 @@ pub const MemoryZipReader = struct {
 
             const filename = data[filename_start..filename_end];
 
-            // Update offset for next entry
+            // Update offset early for better CPU pipelining
             self.current_offset += 46 + filename_len + extra_len + comment_len;
 
+            // Read other fields in struct order for better code generation
             return Entry{
                 .filename = filename,
-                .compression_method = compression_method,
-                .crc32 = crc32,
-                .compressed_size = compressed_size,
-                .uncompressed_size = uncompressed_size,
-                .local_header_offset = local_header_offset,
+                .compression_method = std.mem.readInt(u16, header[10..12], .little),
+                .crc32 = std.mem.readInt(u32, header[16..20], .little),
+                .compressed_size = std.mem.readInt(u32, header[20..24], .little),
+                .uncompressed_size = std.mem.readInt(u32, header[24..28], .little),
+                .local_header_offset = std.mem.readInt(u32, header[42..46], .little),
             };
         }
     };
@@ -167,7 +177,8 @@ pub const MemoryZipReader = struct {
         local_header_offset: u32,
 
         /// Get the compressed data for this entry
-        pub fn getCompressedData(self: Entry, reader: *const MemoryZipReader) ![]const u8 {
+        /// Marked inline for better performance
+        pub inline fn getCompressedData(self: Entry, reader: *const MemoryZipReader) ![]const u8 {
             const data = reader.data;
             const offset = self.local_header_offset;
 
@@ -175,8 +186,8 @@ pub const MemoryZipReader = struct {
 
             const local_header = data[offset..];
 
-            // Check signature: PK\x03\x04
-            const signature = [4]u8{ 0x50, 0x4b, 0x03, 0x04 };
+            // Check signature: PK\x03\x04 - using comptime for optimization
+            const signature = comptime [4]u8{ 0x50, 0x4b, 0x03, 0x04 };
             if (!std.mem.eql(u8, local_header[0..4], &signature)) {
                 return error.InvalidLocalHeaderSignature;
             }
@@ -208,6 +219,8 @@ pub const MemoryZipReader = struct {
             }
         }
 
+        /// Decompress deflate-compressed data
+        /// Optimized with larger buffer sizes (16KB reader buffer)
         fn decompressDeflate(self: Entry, compressed_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
             // Handle empty files
             if (self.uncompressed_size == 0) {
@@ -222,8 +235,9 @@ pub const MemoryZipReader = struct {
             var fbs = std.io.fixedBufferStream(compressed_data);
             var stream_reader = fbs.reader();
 
-            // Adapt the old-style reader to the new API
-            var reader_buffer: [4096]u8 = undefined;
+            // Use 16KB buffer for better I/O performance (was 4KB)
+            // Larger buffers reduce the number of function calls and improve cache utilization
+            var reader_buffer: [16384]u8 = undefined;
             var adapted_reader = stream_reader.adaptToNewApi(&reader_buffer);
 
             // Create decompressor with a window buffer for history
@@ -242,14 +256,14 @@ pub const MemoryZipReader = struct {
         }
 
         /// Check if this entry is a directory
-        pub fn isDirectory(self: Entry) bool {
+        pub inline fn isDirectory(self: Entry) bool {
             return self.uncompressed_size == 0 and
                 self.filename.len > 0 and
                 self.filename[self.filename.len - 1] == '/';
         }
 
         /// Get compression method as a string
-        pub fn compressionMethodName(self: Entry) []const u8 {
+        pub inline fn compressionMethodName(self: Entry) []const u8 {
             return switch (self.compression_method) {
                 0 => "store",
                 8 => "deflate",
