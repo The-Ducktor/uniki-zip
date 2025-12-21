@@ -93,12 +93,10 @@ fn readZipFromMemory(zip_data: []const u8) !void {
 
 fn readZipFromMemoryPure(allocator: std.mem.Allocator, zip_data: []const u8) !void {
     var reader = zip.MemoryZipReader.init(zip_data);
-    var iter = try reader.iterate(allocator);
+    var iter = try reader.iterate();
 
     var count: usize = 0;
     while (try iter.next()) |entry| {
-        defer entry.deinit(allocator);
-
         if (entry.uncompressed_size == 0) continue;
         count += 1;
 

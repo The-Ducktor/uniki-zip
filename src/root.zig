@@ -29,16 +29,27 @@ pub const MemoryZipReader = struct {
     fn findEndRecord(self: *const MemoryZipReader) !EndOfCentralDirectory {
         // The EOCD is at the end of the file, we search backwards
         const min_eocd_size = 22; // minimum size of EOCD record
-        if (self.data.len < min_eocd_size) return error.ZipTooSmall;
+        if (self.data.len < min_eocd_size) {
+            @branchHint(.cold);
+            return error.ZipTooSmall;
+        }
 
         // Search for the EOCD signature from the end
         // PK\x05\x06 - using comptime for optimization
         const signature = comptime [4]u8{ 0x50, 0x4b, 0x05, 0x06 };
 
+        // Limit search window: EOCD can only be in last ~65KB (22-byte header + max 65535-byte comment)
+        const max_comment_len = 65535;
+        const max_eocd_search = min_eocd_size + max_comment_len;
+        const search_start = if (self.data.len > max_eocd_search)
+            self.data.len - max_eocd_search
+        else
+            0;
+
         // Use std.mem.lastIndexOf for optimized (potentially SIMD) search
         const search_end = self.data.len - min_eocd_size + 4;
-        if (std.mem.lastIndexOf(u8, self.data[0..search_end], &signature)) |pos| {
-            return self.parseEndRecord(pos);
+        if (std.mem.lastIndexOf(u8, self.data[search_start..search_end], &signature)) |pos| {
+            return self.parseEndRecord(search_start + pos);
         }
 
         return error.EndOfCentralDirectoryNotFound;
@@ -47,7 +58,10 @@ pub const MemoryZipReader = struct {
     /// Parse the End of Central Directory record
     /// Marked inline for better performance in hot paths
     inline fn parseEndRecord(self: *const MemoryZipReader, offset: usize) !EndOfCentralDirectory {
-        if (offset + 22 > self.data.len) return error.ZipTruncated;
+        if (offset + 22 > self.data.len) {
+            @branchHint(.cold);
+            return error.ZipTruncated;
+        }
 
         const data = self.data[offset..];
 
@@ -98,7 +112,13 @@ pub const MemoryZipReader = struct {
         // Pre-allocate space for efficiency
         try map.ensureTotalCapacity(eocd.cd_records_total);
 
-        var iter = try self.iterate();
+        // Create iterator directly to avoid double findEndRecord call
+        var iter = Iterator{
+            .reader = self,
+            .total_entries = eocd.cd_records_total,
+            .current_entry = 0,
+            .current_offset = eocd.cd_offset,
+        };
         while (try iter.next()) |entry| {
             // Use putNoClobber for better performance when we know keys are unique
             try map.putNoClobber(entry.filename, entry);
@@ -130,13 +150,17 @@ pub const MemoryZipReader = struct {
             const data = self.reader.data;
             const offset = self.current_offset;
 
-            if (offset + 46 > data.len) return error.ZipTruncated;
+            if (offset + 46 > data.len) {
+                @branchHint(.cold);
+                return error.ZipTruncated;
+            }
 
             const header = data[offset..];
 
-            // Check signature: PK\x01\x02 - using comptime for optimization
-            const signature = comptime [4]u8{ 0x50, 0x4b, 0x01, 0x02 };
-            if (!std.mem.eql(u8, header[0..4], &signature)) {
+            // Check signature: PK\x01\x02 - using integer comparison (faster than mem.eql)
+            const sig = std.mem.readInt(u32, header[0..4], .little);
+            if (sig != 0x02014b50) {
+                @branchHint(.cold);
                 return error.InvalidCentralDirectorySignature;
             }
 
@@ -153,7 +177,14 @@ pub const MemoryZipReader = struct {
             const filename = data[filename_start..filename_end];
 
             // Update offset early for better CPU pipelining
-            self.current_offset += 46 + filename_len + extra_len + comment_len;
+            const entry_size = 46 + filename_len + extra_len + comment_len;
+            self.current_offset += entry_size;
+
+            // Prefetch next entry's memory for better cache utilization
+            const next_offset = self.current_offset;
+            if (next_offset + 46 <= data.len) {
+                @prefetch(data.ptr + next_offset, .{ .locality = 3 });
+            }
 
             // Read other fields in struct order for better code generation
             return Entry{
@@ -182,13 +213,17 @@ pub const MemoryZipReader = struct {
             const data = reader.data;
             const offset = self.local_header_offset;
 
-            if (offset + 30 > data.len) return error.ZipTruncated;
+            if (offset + 30 > data.len) {
+                @branchHint(.cold);
+                return error.ZipTruncated;
+            }
 
             const local_header = data[offset..];
 
-            // Check signature: PK\x03\x04 - using comptime for optimization
-            const signature = comptime [4]u8{ 0x50, 0x4b, 0x03, 0x04 };
-            if (!std.mem.eql(u8, local_header[0..4], &signature)) {
+            // Check signature: PK\x03\x04 - using integer comparison (faster than mem.eql)
+            const sig = std.mem.readInt(u32, local_header[0..4], .little);
+            if (sig != 0x04034b50) {
+                @branchHint(.cold);
                 return error.InvalidLocalHeaderSignature;
             }
 
@@ -198,7 +233,10 @@ pub const MemoryZipReader = struct {
             const data_offset = offset + 30 + local_filename_len + local_extra_len;
             const data_end = data_offset + self.compressed_size;
 
-            if (data_end > data.len) return error.ZipTruncated;
+            if (data_end > data.len) {
+                @branchHint(.cold);
+                return error.ZipTruncated;
+            }
 
             return data[data_offset..data_end];
         }
@@ -224,12 +262,16 @@ pub const MemoryZipReader = struct {
         fn decompressDeflate(self: Entry, compressed_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
             // Handle empty files
             if (self.uncompressed_size == 0) {
+                @branchHint(.cold);
                 return try allocator.alloc(u8, 0);
             }
 
             // Allocate output buffer
             const result = try allocator.alloc(u8, self.uncompressed_size);
             errdefer allocator.free(result);
+
+            // Prefetch compressed data for decompression
+            @prefetch(compressed_data.ptr, .{ .locality = 3 });
 
             // Create a fixed buffer stream from compressed data
             var fbs = std.io.fixedBufferStream(compressed_data);

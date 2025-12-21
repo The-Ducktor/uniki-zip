@@ -52,7 +52,7 @@ pub fn main() !void {
 
     // Create memory ZIP reader using the library API
     var reader = zip.MemoryZipReader.init(zip_data);
-    var iter = try reader.iterate(allocator);
+    var iter = try reader.iterate();
 
     std.debug.print("Iterating through ZIP entries:\n", .{});
     std.debug.print("{s}\n", .{"-" ** 60});
@@ -60,8 +60,6 @@ pub fn main() !void {
     var entry_count: usize = 0;
 
     while (try iter.next()) |entry| {
-        defer entry.deinit(allocator);
-
         entry_count += 1;
         if (entry_count > 20) {
             std.debug.print("\n... (showing only first 20 entries)\n", .{});
