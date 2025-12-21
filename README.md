@@ -1,10 +1,3 @@
-<file_path>
-uniki-zip/src/README.md
-</file_path>
-
-<edit_description>
-Create a comprehensive README.md file describing how to use the in-memory ZIP reader library
-</edit_description>
 
 # Uniki-ZIP: Pure In-Memory ZIP Reader for Zig
 
