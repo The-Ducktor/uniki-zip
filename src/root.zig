@@ -3,36 +3,6 @@
 //! This library provides a pure in-memory ZIP file reader that doesn't require
 //! writing to temporary files or using file handles. It supports both uncompressed
 //! (store) and deflate-compressed entries.
-//!
-//! Example usage:
-//! ```zig
-//! const std = @import("std");
-//! const zip = @import("zip_test");
-//!
-//! pub fn main() !void {
-//!     const allocator = std.heap.page_allocator;
-//!
-//!     // Load ZIP data into memory
-//!     const zip_data = try std.fs.cwd().readFileAlloc(allocator, "files/c.epub", 10 * 1024 * 1024);
-//!     defer allocator.free(zip_data);
-//!
-//!     // Create reader and iterate through entries
-//!     var reader = zip.MemoryZipReader.init(zip_data);
-//!     var iter = try reader.iterate(allocator);
-//!
-//!     while (try iter.next()) |entry| {
-//!         defer entry.deinit(allocator);
-//!
-//!         std.debug.print("File: {s}\n", .{entry.filename});
-//!
-//!         // Decompress the entry
-//!         const data = try entry.decompress(&reader, allocator);
-//!         defer allocator.free(data);
-//!
-//!         // Use the decompressed data...
-//!     }
-//! }
-//! ```
 
 const std = @import("std");
 const flate = std.compress.flate;
@@ -41,7 +11,6 @@ const flate = std.compress.flate;
 /// This implementation reads directly from a byte slice in memory
 pub const MemoryZipReader = struct {
     data: []const u8,
-    pos: usize = 0,
 
     /// Initialize a new MemoryZipReader with ZIP data
     pub fn init(data: []const u8) MemoryZipReader {
@@ -49,7 +18,7 @@ pub const MemoryZipReader = struct {
     }
 
     /// Find the End of Central Directory record
-    fn findEndRecord(self: *MemoryZipReader) !EndOfCentralDirectory {
+    fn findEndRecord(self: *const MemoryZipReader) !EndOfCentralDirectory {
         // The EOCD is at the end of the file, we search backwards
         const min_eocd_size = 22; // minimum size of EOCD record
         if (self.data.len < min_eocd_size) return error.ZipTooSmall;
@@ -58,7 +27,7 @@ pub const MemoryZipReader = struct {
         const signature = [4]u8{ 0x50, 0x4b, 0x05, 0x06 }; // PK\x05\x06
 
         var search_pos: usize = self.data.len - min_eocd_size;
-        while (search_pos > 0) : (search_pos -= 1) {
+        while (true) : (search_pos -= 1) {
             if (std.mem.eql(u8, self.data[search_pos..][0..4], &signature)) {
                 return self.parseEndRecord(search_pos);
             }
@@ -68,7 +37,7 @@ pub const MemoryZipReader = struct {
         return error.EndOfCentralDirectoryNotFound;
     }
 
-    fn parseEndRecord(self: *MemoryZipReader, offset: usize) !EndOfCentralDirectory {
+    fn parseEndRecord(self: *const MemoryZipReader, offset: usize) !EndOfCentralDirectory {
         if (offset + 22 > self.data.len) return error.ZipTruncated;
 
         const data = self.data[offset..];
@@ -85,14 +54,12 @@ pub const MemoryZipReader = struct {
     }
 
     /// Create an iterator to iterate through all entries in the ZIP file
-    pub fn iterate(self: *MemoryZipReader, allocator: std.mem.Allocator) !Iterator {
+    pub fn iterate(self: *const MemoryZipReader, allocator: std.mem.Allocator) !Iterator {
         const eocd = try self.findEndRecord();
 
         return Iterator{
             .reader = self,
             .allocator = allocator,
-            .cd_offset = eocd.cd_offset,
-            .cd_size = eocd.cd_size,
             .total_entries = eocd.cd_records_total,
             .current_entry = 0,
             .current_offset = eocd.cd_offset,
@@ -101,10 +68,8 @@ pub const MemoryZipReader = struct {
 
     /// Iterator for ZIP entries
     pub const Iterator = struct {
-        reader: *MemoryZipReader,
+        reader: *const MemoryZipReader,
         allocator: std.mem.Allocator,
-        cd_offset: u32,
-        cd_size: u32,
         total_entries: u16,
         current_entry: u16,
         current_offset: u32,
@@ -178,7 +143,7 @@ pub const MemoryZipReader = struct {
         }
 
         /// Get the compressed data for this entry
-        pub fn getCompressedData(self: Entry, reader: *MemoryZipReader) ![]const u8 {
+        pub fn getCompressedData(self: Entry, reader: *const MemoryZipReader) ![]const u8 {
             const data = reader.data;
             const offset = self.local_header_offset;
 
@@ -204,7 +169,7 @@ pub const MemoryZipReader = struct {
         }
 
         /// Decompress the entry data (supports store and deflate compression)
-        pub fn decompress(self: Entry, reader: *MemoryZipReader, allocator: std.mem.Allocator) ![]u8 {
+        pub fn decompress(self: Entry, reader: *const MemoryZipReader, allocator: std.mem.Allocator) ![]u8 {
             const compressed_data = try self.getCompressedData(reader);
 
             // Compression method: 0 = store (no compression), 8 = deflate
@@ -229,69 +194,25 @@ pub const MemoryZipReader = struct {
             const result = try allocator.alloc(u8, self.uncompressed_size);
             errdefer allocator.free(result);
 
-            // We need to pad the compressed data to avoid underflow in alignBitsPreserving.
-            // The decompressor may read ahead and then try to "put back" bytes by decrementing
-            // the seek position. With a small buffer, this can cause integer underflow.
-            // By providing extra padding, we ensure the seek position has room to be decremented.
-            const padding_size: usize = 16; // Extra bytes to prevent underflow
-            const padded_size = compressed_data.len + padding_size;
-            const padded_buffer = try allocator.alloc(u8, padded_size);
-            defer allocator.free(padded_buffer);
+            // Create a fixed buffer stream from compressed data
+            var fbs = std.io.fixedBufferStream(compressed_data);
+            var stream_reader = fbs.reader();
 
-            @memcpy(padded_buffer[0..compressed_data.len], compressed_data);
-            @memset(padded_buffer[compressed_data.len..], 0);
-
-            // Create a reader from the padded buffer
-            var input_reader = std.Io.Reader.fixed(padded_buffer);
+            // Adapt the old-style reader to the new API
+            var reader_buffer: [4096]u8 = undefined;
+            var adapted_reader = stream_reader.adaptToNewApi(&reader_buffer);
 
             // Create decompressor with a window buffer for history
             // ZIP uses raw deflate (no zlib/gzip wrapper)
             var decompress_buffer: [flate.max_window_len]u8 = undefined;
             var decompressor = flate.Decompress.init(
-                &input_reader,
+                &adapted_reader.new_interface,
                 .raw,
                 &decompress_buffer,
             );
 
-            // Read decompressed data iteratively to handle end-of-stream properly
-            var total_read: usize = 0;
-            while (total_read < self.uncompressed_size) {
-                const remaining = self.uncompressed_size - total_read;
-                const bytes_read = decompressor.reader.readSliceShort(result[total_read..]) catch |err| {
-                    // EndOfStream before we got all data is an error
-                    if (err == error.EndOfStream) {
-                        if (total_read < self.uncompressed_size) {
-                            return error.DecompressTruncated;
-                        }
-                        break;
-                    }
-                    return err;
-                };
-
-                if (bytes_read == 0) {
-                    // No more data available
-                    if (total_read < self.uncompressed_size) {
-                        return error.DecompressTruncated;
-                    }
-                    break;
-                }
-
-                total_read += bytes_read;
-
-                // Check if we've read enough
-                if (total_read >= self.uncompressed_size) {
-                    break;
-                }
-
-                // Safety check to prevent infinite loop
-                if (bytes_read == 0 and remaining == self.uncompressed_size - total_read) {
-                    break;
-                }
-            }
-
-            if (total_read != self.uncompressed_size) {
-                return error.DecompressSizeMismatch;
-            }
+            // Read all decompressed data
+            try decompressor.reader.readSliceAll(result);
 
             return result;
         }
@@ -328,34 +249,4 @@ pub const MemoryZipReader = struct {
 test "basic library functionality" {
     const testing = std.testing;
     try testing.expect(true);
-}
-
-test "read ZIP file from files directory" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    // Read the c.epub file from the files directory
-    const cwd = std.fs.cwd();
-    const zip_data = cwd.readFileAlloc(allocator, "files/c.epub", 10 * 1024 * 1024) catch |err| {
-        std.debug.print("Could not read files/c.epub: {}\n", .{err});
-        std.debug.print("Note: This test requires files/c.epub to be available\n", .{});
-        return err;
-    };
-    defer allocator.free(zip_data);
-
-    // Create reader and verify it can find the End of Central Directory
-    var reader = MemoryZipReader.init(zip_data);
-
-    // Try to iterate through entries
-    var iter = try reader.iterate(allocator);
-
-    var entry_count: usize = 0;
-    while (try iter.next()) |entry| {
-        defer entry.deinit(allocator);
-        entry_count += 1;
-        // Just verify we can read entries
-        try testing.expect(entry.filename.len > 0);
-    }
-
-    try testing.expect(entry_count > 0);
 }

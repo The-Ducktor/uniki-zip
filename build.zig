@@ -39,6 +39,22 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(memory_exe);
 
+    // WASM build
+    const wasm_lib = b.addExecutable(.{
+        .name = "uniki-zip",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .wasm32,
+                .os_tag = .freestanding,
+            }),
+            .optimize = optimize,
+        }),
+    });
+    wasm_lib.rdynamic = true;
+    wasm_lib.entry = .disabled;
+    b.installArtifact(wasm_lib);
+
     // Install files directory
     const install_files = b.addInstallDirectory(.{
         .source_dir = b.path("files"),
