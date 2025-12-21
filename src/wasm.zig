@@ -26,7 +26,7 @@ export fn free(ptr: [*]u8, len: usize) void {
 /// Example: Get the number of files in a ZIP
 export fn get_entry_count(ptr: [*]const u8, len: usize) i32 {
     const data = ptr[0..len];
-    const reader = zip.MemoryZipReader.init(data);
+    var reader = zip.MemoryZipReader.init(data);
     const iter = reader.iterate() catch return -1;
     return @intCast(iter.total_entries);
 }
@@ -35,7 +35,7 @@ export fn get_entry_count(ptr: [*]const u8, len: usize) i32 {
 /// Returns a pointer to the data, sets out_len
 export fn decompress_entry(zip_ptr: [*]const u8, zip_len: usize, index: usize, out_len: *usize) ?[*]u8 {
     const data = zip_ptr[0..zip_len];
-    const reader = zip.MemoryZipReader.init(data);
+    var reader = zip.MemoryZipReader.init(data);
     var iter = reader.iterate() catch |err| {
         log("iterate error: {any}", .{err});
         return null;

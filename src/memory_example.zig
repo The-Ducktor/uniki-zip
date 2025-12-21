@@ -50,7 +50,7 @@ pub fn main() !void {
     std.debug.print("Reading file: {s}\n", .{zip_filename});
     std.debug.print("Loaded ZIP file into memory: {d} bytes\n\n", .{zip_data.len});
 
-    // Create memory ZIP reader using the library API
+    // Create memory ZIP reader using the library API (mutable for EOCD caching)
     var reader = zip.MemoryZipReader.init(zip_data);
     var iter = try reader.iterate();
 

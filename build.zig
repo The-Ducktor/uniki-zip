@@ -39,6 +39,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(memory_exe);
 
+    // Add benchmark executable
+    const benchmark_exe = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zip_test", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(benchmark_exe);
+
     // WASM build
     const wasm_lib = b.addExecutable(.{
         .name = "uniki-zip",
@@ -79,6 +93,16 @@ pub fn build(b: *std.Build) void {
     memory_run_cmd.step.dependOn(&install_files.step);
     if (b.args) |args| {
         memory_run_cmd.addArgs(args);
+    }
+
+    // Run step for benchmark
+    const benchmark_run_step = b.step("bench", "Run benchmarks");
+    const benchmark_run_cmd = b.addRunArtifact(benchmark_exe);
+    benchmark_run_step.dependOn(&benchmark_run_cmd.step);
+    benchmark_run_cmd.step.dependOn(b.getInstallStep());
+    benchmark_run_cmd.step.dependOn(&install_files.step);
+    if (b.args) |args| {
+        benchmark_run_cmd.addArgs(args);
     }
 
     // Test executable for module

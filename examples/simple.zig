@@ -23,7 +23,7 @@ pub fn main() !void {
 
     std.debug.print("Loaded ZIP: {d} bytes\n\n", .{zip_data.len});
 
-    // Initialize the in-memory ZIP reader
+    // Initialize the in-memory ZIP reader (mutable for EOCD caching)
     var reader = zip.MemoryZipReader.init(zip_data);
 
     // Get an iterator for all entries

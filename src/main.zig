@@ -92,6 +92,7 @@ fn readZipFromMemory(zip_data: []const u8) !void {
 }
 
 fn readZipFromMemoryPure(allocator: std.mem.Allocator, zip_data: []const u8) !void {
+    // Use mutable reader for EOCD caching
     var reader = zip.MemoryZipReader.init(zip_data);
     var iter = try reader.iterate();
 
