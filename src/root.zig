@@ -396,8 +396,3 @@ pub const MemoryZipReader = struct {
     }
 };
 
-// Tests
-test "basic library functionality" {
-    const testing = std.testing;
-    try testing.expect(true);
-}

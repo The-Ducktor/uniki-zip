@@ -14,13 +14,14 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len < 2) {
-        std.debug.print("Usage: {s} <zip_file>\n", .{args[0]});
-        std.debug.print("Example: {s} test.zip\n", .{args[0]});
-        return error.MissingArgument;
-    }
+    const zip_filename = if (args.len > 1) args[1] else "files/test.zip";
 
-    const zip_filename = args[1];
+    // Verify file exists
+    std.fs.cwd().access(zip_filename, .{}) catch {
+        std.debug.print("Error: ZIP file '{s}' not found.\n", .{zip_filename});
+        std.debug.print("Usage: {s} [zip_file]\n", .{args[0]});
+        return error.FileNotFound;
+    };
 
     std.debug.print("=== uniki-zip Benchmark & Profiling ===\n", .{});
     std.debug.print("File: {s}\n\n", .{zip_filename});
