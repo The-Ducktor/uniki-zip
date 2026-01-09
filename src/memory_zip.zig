@@ -183,19 +183,15 @@ pub const MemoryZipReader = struct {
             const result = try allocator.alloc(u8, self.uncompressed_size);
             errdefer allocator.free(result);
 
-            // Create a fixed buffer stream from compressed data
-            var stream = std.io.fixedBufferStream(compressed_data);
-            var stream_reader = stream.reader();
-
-            // Adapt the old-style reader to the new API
-            var reader_buffer: [4096]u8 = undefined;
-            var adapted_reader = stream_reader.adaptToNewApi(&reader_buffer);
+            // Create a fixed reader directly from the compressed data slice
+            // This is the modern std.Io.Reader API - no adaptToNewApi needed
+            var reader: std.Io.Reader = .fixed(compressed_data);
 
             // Create decompressor with a window buffer for history
             // ZIP uses raw deflate (no zlib/gzip wrapper)
             var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
             var decompressor = std.compress.flate.Decompress.init(
-                &adapted_reader.new_interface,
+                &reader,
                 .raw,
                 &decompress_buffer,
             );
@@ -218,3 +214,34 @@ pub const MemoryZipReader = struct {
         comment_length: u16,
     };
 };
+
+test "deflate decompression with modern std.Io.Reader API" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Raw deflate compressed "Hello, World!" (no zlib/gzip wrapper)
+    // This was compressed using raw deflate
+    const compressed = [_]u8{
+        0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0xd7, 0x51, 0x08,
+        0xcf, 0x2f, 0xca, 0x49, 0x51, 0x04, 0x00,
+    };
+    const expected = "Hello, World!";
+
+    // Create a fixed reader directly from the compressed data slice
+    // This is the modern std.Io.Reader API - no adaptToNewApi needed
+    var reader: std.Io.Reader = .fixed(&compressed);
+
+    // Create decompressor with a window buffer for history
+    var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompressor = std.compress.flate.Decompress.init(
+        &reader,
+        .raw,
+        &decompress_buffer,
+    );
+
+    // Read all decompressed data
+    var result: [64]u8 = undefined;
+    const n = try decompressor.reader.readSliceShort(&result);
+
+    try testing.expectEqualStrings(expected, result[0..n]);
+}

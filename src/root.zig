@@ -279,7 +279,7 @@ pub const MemoryZipReader = struct {
         }
 
         /// Decompress deflate-compressed data
-        /// Optimized with larger buffer sizes (16KB reader buffer)
+        /// Uses modern std.Io.Reader API (no adaptToNewApi needed)
         fn decompressDeflate(self: Entry, compressed_data: []const u8, allocator: std.mem.Allocator) ![]u8 {
             // Handle empty files
             if (self.uncompressed_size == 0) {
@@ -294,20 +294,15 @@ pub const MemoryZipReader = struct {
             // Prefetch compressed data for decompression
             @prefetch(compressed_data.ptr, .{ .locality = 3 });
 
-            // Create a fixed buffer stream from compressed data
-            var fbs = std.io.fixedBufferStream(compressed_data);
-            var stream_reader = fbs.reader();
-
-            // Use 16KB buffer for better I/O performance (was 4KB)
-            // Larger buffers reduce the number of function calls and improve cache utilization
-            var reader_buffer: [16384]u8 = undefined;
-            var adapted_reader = stream_reader.adaptToNewApi(&reader_buffer);
+            // Create a fixed reader directly from the compressed data slice
+            // This is the modern std.Io.Reader API - no adaptToNewApi needed
+            var reader: std.Io.Reader = .fixed(compressed_data);
 
             // Create decompressor with a window buffer for history
             // ZIP uses raw deflate (no zlib/gzip wrapper)
             var decompress_buffer: [flate.max_window_len]u8 = undefined;
             var decompressor = flate.Decompress.init(
-                &adapted_reader.new_interface,
+                &reader,
                 .raw,
                 &decompress_buffer,
             );
@@ -395,4 +390,3 @@ pub const MemoryZipReader = struct {
         return .{ .entries = entries, .data = data };
     }
 };
-
